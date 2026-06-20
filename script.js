@@ -3,17 +3,24 @@
 const STORAGE_KEY = "simpleRefuelEstimatorInputs";
 const DB_NAME = "simpleRefuelEstimatorHandles";
 const HANDLE_STORE = "handles";
-const HANDLE_KEY = "dataDirectory";
+const HANDLE_KEY = "projectDirectory";
+const LEGACY_HANDLE_KEY = "dataDirectory";
 const TRIPS_FILENAME = "trips.json";
+const RECENT_TRIP_LIMIT = 5;
 
 const state = {
   directoryHandle: null,
   hasWriteAccess: false,
   trips: [],
-  currentEstimate: null
+  currentEstimate: null,
+  showAllTrips: false,
+  chartMetric: "cost",
+  chartPeriod: "all",
+  deleteTripId: null,
+  touchedFields: new Set(),
+  toastTimer: null
 };
 
-const form = document.querySelector("#calculator-form");
 const fields = {
   tripDate: document.querySelector("#trip-date"),
   mapUrl: document.querySelector("#map-url"),
@@ -22,125 +29,238 @@ const fields = {
   fuelPrice: document.querySelector("#fuel-price"),
   margin: document.querySelector("#margin")
 };
-const numericFields = ["distance", "efficiency", "fuelPrice", "margin"];
-const validatedFields = [...numericFields, "mapUrl"];
-const errorElements = {
-  distance: document.querySelector("#distance-error"),
-  efficiency: document.querySelector("#efficiency-error"),
-  fuelPrice: document.querySelector("#fuel-price-error"),
-  margin: document.querySelector("#margin-error"),
-  mapUrl: document.querySelector("#map-url-error")
-};
-const results = {
-  distance: document.querySelector("#result-distance"),
-  minimum: document.querySelector("#result-minimum"),
-  recommended: document.querySelector("#result-recommended"),
-  cost: document.querySelector("#result-cost"),
-  status: document.querySelector("#result-status")
-};
-const historyElements = {
+
+const elements = {
+  form: document.querySelector("#calculator-form"),
+  calculateButton: document.querySelector("#calculate-button"),
+  openMapLink: document.querySelector("#open-map-link"),
+  quickOptions: [...document.querySelectorAll(".quick-option")],
+  resultRecommended: document.querySelector("#result-recommended"),
+  resultCost: document.querySelector("#result-cost"),
+  resultMinimum: document.querySelector("#result-minimum"),
+  resultDistance: document.querySelector("#result-distance"),
+  resultMargin: document.querySelector("#result-margin"),
+  saveTrip: document.querySelector("#save-trip"),
+  toast: document.querySelector("#toast"),
+  tabs: [...document.querySelectorAll("[role='tab']")],
+  panels: [...document.querySelectorAll("[role='tabpanel']")],
   chooseFolder: document.querySelector("#choose-folder"),
   folderStatus: document.querySelector("#folder-status"),
   historyMessage: document.querySelector("#history-message"),
-  tableWrapper: document.querySelector("#trip-table-wrapper"),
-  list: document.querySelector("#trip-history"),
-  empty: document.querySelector("#empty-history"),
-  outstandingLiters: document.querySelector("#outstanding-liters"),
+  tableWrapper: document.querySelector("#history-table-wrapper"),
+  tableBody: document.querySelector("#history-table-body"),
+  cardList: document.querySelector("#history-card-list"),
+  emptyHistory: document.querySelector("#empty-history"),
+  viewAllTrips: document.querySelector("#view-all-trips"),
+  outstandingFuel: document.querySelector("#outstanding-fuel"),
   outstandingCost: document.querySelector("#outstanding-cost"),
-  chart: document.querySelector("#cost-chart"),
-  chartSvg: document.querySelector("#cost-chart-svg"),
+  summaryFuel: document.querySelector("#summary-fuel"),
+  summarySpending: document.querySelector("#summary-spending"),
+  summaryAverage: document.querySelector("#summary-average"),
+  summaryDistance: document.querySelector("#summary-distance"),
+  metricButtons: [...document.querySelectorAll("[data-metric]")],
+  periodButtons: [...document.querySelectorAll("[data-period]")],
+  chartTitle: document.querySelector("#chart-title"),
+  chartContainer: document.querySelector("#chart-container"),
+  chartSvg: document.querySelector("#analytics-chart-svg"),
   chartTooltip: document.querySelector("#chart-tooltip"),
   chartEmpty: document.querySelector("#chart-empty"),
-  saveTrip: document.querySelector("#save-trip"),
-  saveMessage: document.querySelector("#save-trip-message")
+  deleteDialog: document.querySelector("#delete-dialog"),
+  cancelDelete: document.querySelector("#cancel-delete"),
+  confirmDelete: document.querySelector("#confirm-delete")
 };
 
-function parseNumber(value) {
+const errorElements = Object.fromEntries(
+  Object.keys(fields).map((name) => [name, document.querySelector(`#${toKebabCase(name)}-error`)])
+);
+
+function toKebabCase(value) {
+  return value.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+}
+
+function parseDecimal(value) {
   const normalized = String(value).trim().replace(/\s/g, "").replace(",", ".");
   return normalized === "" ? Number.NaN : Number(normalized);
 }
 
-function validateInputs(values, mapUrl) {
+function parseFuelPrice(value) {
+  let normalized = String(value).trim().replace(/\s/g, "");
+  if (normalized.includes(",")) normalized = normalized.replace(/\./g, "").replace(",", ".");
+  else if (/^\d{1,3}(\.\d{3})+$/.test(normalized)) normalized = normalized.replace(/\./g, "");
+  return normalized === "" ? Number.NaN : Number(normalized);
+}
+
+function getFormValues() {
+  return {
+    tripDate: fields.tripDate.value,
+    mapUrl: fields.mapUrl.value.trim(),
+    distance: parseDecimal(fields.distance.value),
+    efficiency: parseDecimal(fields.efficiency.value),
+    fuelPrice: parseFuelPrice(fields.fuelPrice.value),
+    margin: parseDecimal(fields.margin.value)
+  };
+}
+
+function validateForm(values) {
   const errors = {};
-  if (!Number.isFinite(values.distance) || values.distance <= 0) errors.distance = "Enter a distance greater than 0 km.";
-  if (!Number.isFinite(values.efficiency) || values.efficiency <= 0) errors.efficiency = "Enter fuel efficiency greater than 0 km/L.";
-  if (!Number.isFinite(values.fuelPrice) || values.fuelPrice <= 0) errors.fuelPrice = "Enter a fuel price greater than Rp0.";
-  if (!Number.isFinite(values.margin) || values.margin < 0) errors.margin = "Reserve margin cannot be negative.";
-  if (!mapUrl) errors.mapUrl = "Enter the Google Maps route link.";
-  else if (!isSafeMapUrl(mapUrl)) errors.mapUrl = "Enter a valid HTTPS Google Maps link.";
+  if (!values.tripDate) errors.tripDate = "Select the trip date.";
+  if (!values.mapUrl) errors.mapUrl = "Enter the Google Maps route URL.";
+  else if (!isSafeMapUrl(values.mapUrl)) errors.mapUrl = "Enter a valid HTTPS Google Maps URL.";
+  if (!Number.isFinite(values.distance) || values.distance <= 0) errors.distance = "Distance must be greater than 0 km.";
+  if (!Number.isFinite(values.efficiency) || values.efficiency <= 0) errors.efficiency = "Fuel efficiency must be greater than 0 km/L.";
+  if (!Number.isFinite(values.fuelPrice) || values.fuelPrice <= 0) errors.fuelPrice = "Fuel price must be greater than Rp0.";
+  if (!Number.isFinite(values.margin) || values.margin < 0 || values.margin > 100) errors.margin = "Reserve margin must be between 0% and 100%.";
   return errors;
 }
 
-function calculateEstimate(values) {
-  const minimumFuelLiter = values.distance / values.efficiency;
-  const recommendedFuelLiter = minimumFuelLiter + (minimumFuelLiter * values.margin / 100);
-  return { minimumFuelLiter, recommendedFuelLiter, estimatedCost: recommendedFuelLiter * values.fuelPrice };
+function renderValidation(errors, showAll = false) {
+  Object.keys(fields).forEach((name) => {
+    const showMessage = showAll || state.touchedFields.has(name);
+    const message = showMessage ? errors[name] || "" : "";
+    errorElements[name].textContent = message;
+    fields[name].setAttribute("aria-invalid", errors[name] && showMessage ? "true" : "false");
+  });
+  elements.calculateButton.disabled = Object.keys(errors).length > 0;
+  updateSaveButton(errors);
 }
 
-function formatNumber(value) {
-  return new Intl.NumberFormat("id-ID", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
+function calculateFuelEstimate(values) {
+  const minimumFuelLiter = values.distance / values.efficiency;
+  const recommendedFuelLiter = minimumFuelLiter * (1 + values.margin / 100);
+  return {
+    minimumFuelLiter,
+    recommendedFuelLiter,
+    estimatedCost: recommendedFuelLiter * values.fuelPrice
+  };
+}
+
+function formatNumber(value, maximumFractionDigits = 2) {
+  return new Intl.NumberFormat("id-ID", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits
+  }).format(Number(value) || 0);
+}
+
+function formatFuel(value) {
+  return new Intl.NumberFormat("id-ID", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(Number(value) || 0);
 }
 
 function formatCurrency(value) {
-  return new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(value).replace(/\s/g, "");
+  return new Intl.NumberFormat("id-ID", {
+    style: "currency",
+    currency: "IDR",
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0
+  }).format(Number(value) || 0).replace(/\s/g, "");
 }
 
 function formatDate(value) {
   if (!value) return "No date";
   const date = new Date(`${value}T00:00:00`);
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("id-ID", { dateStyle: "medium" }).format(date);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat("id-ID", { day: "2-digit", month: "short", year: "numeric" }).format(date);
+}
+
+function formatShortDate(value) {
+  const date = new Date(`${value || ""}T00:00:00`);
+  return Number.isNaN(date.getTime())
+    ? "N/A"
+    : new Intl.DateTimeFormat("id-ID", { day: "2-digit", month: "short" }).format(date);
 }
 
 function renderResult(values, estimate) {
-  results.distance.textContent = `${formatNumber(values.distance)} km`;
-  results.minimum.textContent = `${formatNumber(estimate.minimumFuelLiter)} L`;
-  results.recommended.textContent = `${formatNumber(estimate.recommendedFuelLiter)} L`;
-  results.cost.textContent = formatCurrency(estimate.estimatedCost);
-  results.status.textContent = `Includes a ${formatNumber(values.margin)}% reserve margin.`;
+  elements.resultRecommended.textContent = `${formatFuel(estimate.recommendedFuelLiter)} L`;
+  elements.resultCost.textContent = formatCurrency(estimate.estimatedCost);
+  elements.resultMinimum.textContent = `${formatFuel(estimate.minimumFuelLiter)} L`;
+  elements.resultDistance.textContent = `${formatNumber(values.distance)} km`;
+  elements.resultMargin.textContent = `${formatNumber(values.margin)}%`;
 }
 
-function clearResults() {
-  Object.values(results).slice(0, 4).forEach((element) => { element.textContent = "--"; });
-  results.status.textContent = "Enter your trip details to see an estimate.";
-  state.currentEstimate = null;
-  updateSaveButton();
+function renderSampleResult() {
+  const values = { distance: 200, efficiency: 40, fuelPrice: 10000, margin: 10 };
+  renderResult(values, calculateFuelEstimate(values));
 }
 
-function renderErrors(errors) {
-  validatedFields.forEach((name) => {
-    const message = errors[name] || "";
-    errorElements[name].textContent = message;
-    fields[name].setAttribute("aria-invalid", message ? "true" : "false");
+function updateQuickOptions() {
+  const margin = parseDecimal(fields.margin.value);
+  elements.quickOptions.forEach((button) => {
+    const selected = Number(button.dataset.margin) === margin;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
   });
-  const firstInvalid = validatedFields.find((name) => errors[name]);
-  if (firstInvalid) fields[firstInvalid].focus();
 }
 
-function getRawInputs() {
-  return Object.fromEntries(Object.entries(fields).map(([name, field]) => [name, field.value.trim()]));
+function updateMapLink() {
+  const value = fields.mapUrl.value.trim();
+  const valid = isSafeMapUrl(value);
+  elements.openMapLink.href = valid ? value : "https://www.google.com/maps";
+  elements.openMapLink.firstChild.textContent = valid ? "Open route in Google Maps " : "Open in Google Maps ";
 }
 
-function getNumericValues() {
-  return {
-    distance: parseNumber(fields.distance.value),
-    efficiency: parseNumber(fields.efficiency.value),
-    fuelPrice: parseNumber(fields.fuelPrice.value),
-    margin: parseNumber(fields.margin.value.trim() || "10")
-  };
+function isSafeMapUrl(value) {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    return url.protocol === "https:" && (
+      hostname === "google.com" ||
+      hostname.endsWith(".google.com") ||
+      hostname === "maps.app.goo.gl"
+    );
+  } catch (error) {
+    return false;
+  }
 }
 
-function saveInputs() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(getRawInputs())); } catch (error) { /* Storage may be unavailable. */ }
+function saveFormPreferences() {
+  const raw = Object.fromEntries(Object.entries(fields).map(([name, input]) => [name, input.value]));
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(raw)); } catch (error) { /* Preferences are optional. */ }
 }
 
-function restoreInputs() {
+function restoreFormPreferences() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (saved && typeof saved === "object") {
-      Object.keys(fields).forEach((name) => { if (typeof saved[name] === "string") fields[name].value = saved[name]; });
+      Object.keys(fields).forEach((name) => {
+        if (typeof saved[name] === "string" && saved[name] !== "") fields[name].value = saved[name];
+      });
     }
-  } catch (error) { /* Ignore invalid local preferences. */ }
+  } catch (error) { /* Ignore malformed preferences. */ }
   if (!fields.tripDate.value) fields.tripDate.value = new Date().toISOString().slice(0, 10);
+  formatFuelPriceInput();
+  updateQuickOptions();
+  updateMapLink();
+}
+
+function formatFuelPriceInput() {
+  const value = parseFuelPrice(fields.fuelPrice.value);
+  if (Number.isFinite(value) && value > 0) fields.fuelPrice.value = formatNumber(value, 0);
+}
+
+function invalidateEstimateIfNeeded(fieldName) {
+  if (["distance", "efficiency", "fuelPrice", "margin"].includes(fieldName)) {
+    state.currentEstimate = null;
+  }
+}
+
+function updateSaveButton(errors = validateForm(getFormValues())) {
+  elements.saveTrip.disabled = !state.hasWriteAccess || !state.currentEstimate || Object.keys(errors).length > 0;
+  elements.saveTrip.title = !state.hasWriteAccess
+    ? "Connect the project folder to save this trip."
+    : !state.currentEstimate
+      ? "Calculate the estimate before saving."
+      : "Save this trip";
+}
+
+function showToast(message, isError = false) {
+  window.clearTimeout(state.toastTimer);
+  elements.toast.textContent = message;
+  elements.toast.classList.toggle("error", isError);
+  elements.toast.hidden = false;
+  state.toastTimer = window.setTimeout(() => { elements.toast.hidden = true; }, 3200);
 }
 
 function openHandleDatabase() {
@@ -153,39 +273,46 @@ function openHandleDatabase() {
 }
 
 async function storeDirectoryHandle(handle) {
-  const db = await openHandleDatabase();
+  const database = await openHandleDatabase();
   await new Promise((resolve, reject) => {
-    const transaction = db.transaction(HANDLE_STORE, "readwrite");
+    const transaction = database.transaction(HANDLE_STORE, "readwrite");
     transaction.objectStore(HANDLE_STORE).put(handle, HANDLE_KEY);
     transaction.oncomplete = resolve;
     transaction.onerror = () => reject(transaction.error);
   });
-  db.close();
+  database.close();
 }
 
 async function getStoredDirectoryHandle() {
-  const db = await openHandleDatabase();
+  const database = await openHandleDatabase();
   const handle = await new Promise((resolve, reject) => {
-    const request = db.transaction(HANDLE_STORE).objectStore(HANDLE_STORE).get(HANDLE_KEY);
-    request.onsuccess = () => resolve(request.result || null);
+    const store = database.transaction(HANDLE_STORE).objectStore(HANDLE_STORE);
+    const request = store.get(HANDLE_KEY);
+    request.onsuccess = () => {
+      if (request.result) return resolve(request.result);
+      const legacyRequest = database.transaction(HANDLE_STORE).objectStore(HANDLE_STORE).get(LEGACY_HANDLE_KEY);
+      legacyRequest.onsuccess = () => resolve(legacyRequest.result || null);
+      legacyRequest.onerror = () => reject(legacyRequest.error);
+    };
     request.onerror = () => reject(request.error);
   });
-  db.close();
+  database.close();
   return handle;
 }
 
-async function chooseDataFolder() {
-  clearMessage(historyElements.historyMessage);
+async function chooseProjectFolder() {
+  clearInlineMessage();
   if (!("showDirectoryPicker" in window)) {
-    showMessage(historyElements.historyMessage, "This browser does not support folder access. Use a current Chrome or Edge browser.", true);
+    setInlineMessage("Folder access requires a current Chrome or Edge browser.", true);
     return;
   }
   try {
     const handle = await window.showDirectoryPicker({ id: "refuel-estimator-project", mode: "readwrite" });
     await connectDirectory(handle);
     await storeDirectoryHandle(handle);
+    showToast("Project folder connected.");
   } catch (error) {
-    if (error.name !== "AbortError") showMessage(historyElements.historyMessage, `Could not open the folder: ${error.message}`, true);
+    if (error.name !== "AbortError") setInlineMessage(`Could not connect the folder: ${error.message}`, true);
   }
 }
 
@@ -193,31 +320,38 @@ async function connectDirectory(handle) {
   state.directoryHandle = handle;
   state.hasWriteAccess = true;
   state.trips = await readTripsFile();
-  historyElements.folderStatus.textContent = `Connected project folder: ${handle.name}`;
-  historyElements.chooseFolder.textContent = "Change project folder";
+  elements.folderStatus.textContent = `Connected to ${handle.name}. Changes are saved to trips.json.`;
+  elements.chooseFolder.textContent = "Change folder";
   updateSaveButton();
-  await renderHistory();
+  renderHistory();
+  renderAnalytics();
 }
 
 async function restoreDirectoryConnection() {
-  if (!("showDirectoryPicker" in window)) {
-    historyElements.folderStatus.textContent = "Folder access requires a current Chrome or Edge browser.";
-    return;
-  }
+  if (!("showDirectoryPicker" in window)) return;
   try {
     const handle = await getStoredDirectoryHandle();
     if (!handle) return;
     const permission = await handle.queryPermission({ mode: "readwrite" });
-    if (permission === "granted") {
-      await connectDirectory(handle);
-    } else {
+    if (permission === "granted") await connectDirectory(handle);
+    else {
       state.directoryHandle = handle;
-      state.hasWriteAccess = false;
-      historyElements.folderStatus.textContent = `Project folder remembered: ${handle.name}. Click reconnect to grant access.`;
-      historyElements.chooseFolder.textContent = "Reconnect project folder";
+      elements.folderStatus.textContent = `${handle.name} is remembered. Reconnect to enable changes.`;
+      elements.chooseFolder.textContent = "Reconnect folder";
+    }
+  } catch (error) { /* Read-only loading remains available. */ }
+}
+
+async function reconnectRememberedFolder() {
+  if (!state.directoryHandle) return chooseProjectFolder();
+  try {
+    const permission = await state.directoryHandle.requestPermission({ mode: "readwrite" });
+    if (permission === "granted") {
+      await connectDirectory(state.directoryHandle);
+      showToast("Project folder reconnected.");
     }
   } catch (error) {
-    showMessage(historyElements.historyMessage, "The previous project folder could not be restored.", true);
+    setInlineMessage(`Could not reconnect the folder: ${error.message}`, true);
   }
 }
 
@@ -226,30 +360,15 @@ async function loadTripsReadOnly() {
     const response = await fetch(TRIPS_FILENAME, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const parsed = await response.json();
-    if (!Array.isArray(parsed)) throw new Error(`${TRIPS_FILENAME} must contain a JSON array.`);
+    if (!Array.isArray(parsed)) throw new Error("trips.json must contain a JSON array.");
     state.trips = parsed;
-    if (!state.directoryHandle) {
-      historyElements.folderStatus.textContent = "History loaded read-only. Connect the project folder to enable changes.";
-    }
-    await renderHistory();
+    if (!state.directoryHandle) elements.folderStatus.textContent = "Read-only history loaded. Connect the project folder to make changes.";
+    renderHistory();
+    renderAnalytics();
   } catch (error) {
-    showMessage(historyElements.historyMessage, `Could not load ${TRIPS_FILENAME}: ${error.message}`, true);
-    renderCostChart();
-  }
-}
-
-async function initializeHistory() {
-  await restoreDirectoryConnection();
-  if (!state.hasWriteAccess) await loadTripsReadOnly();
-}
-
-async function reconnectRememberedFolder() {
-  if (!state.directoryHandle) return chooseDataFolder();
-  try {
-    const permission = await state.directoryHandle.requestPermission({ mode: "readwrite" });
-    if (permission === "granted") await connectDirectory(state.directoryHandle);
-  } catch (error) {
-    showMessage(historyElements.historyMessage, `Could not reconnect: ${error.message}`, true);
+    setInlineMessage(`Could not load trips.json: ${error.message}`, true);
+    renderHistory();
+    renderAnalytics();
   }
 }
 
@@ -259,7 +378,7 @@ async function readTripsFile() {
     const text = await (await handle.getFile()).text();
     if (!text.trim()) return [];
     const parsed = JSON.parse(text);
-    if (!Array.isArray(parsed)) throw new Error(`${TRIPS_FILENAME} must contain a JSON array.`);
+    if (!Array.isArray(parsed)) throw new Error("trips.json must contain a JSON array.");
     return parsed;
   } catch (error) {
     if (error.name === "NotFoundError") {
@@ -278,143 +397,291 @@ async function writeTripsFile(trips = state.trips) {
 }
 
 async function saveCurrentTrip() {
-  clearMessage(historyElements.saveMessage);
-  if (!state.directoryHandle) {
-    showMessage(historyElements.saveMessage, "Connect the project folder before saving a trip.", true);
-    return;
-  }
-  if (!state.currentEstimate) {
-    showMessage(historyElements.saveMessage, "Calculate the fuel estimate before saving.", true);
-    return;
-  }
-  if (!isSafeMapUrl(fields.mapUrl.value.trim())) {
-    showMessage(historyElements.saveMessage, "Enter a valid HTTPS Google Maps link before saving.", true);
-    fields.mapUrl.focus();
+  if (!state.hasWriteAccess || !state.currentEstimate) return;
+  const values = getFormValues();
+  const errors = validateForm(values);
+  if (Object.keys(errors).length) {
+    renderValidation(errors, true);
     return;
   }
 
-  historyElements.saveTrip.disabled = true;
-  let tripId = null;
+  elements.saveTrip.disabled = true;
+  const estimate = state.currentEstimate.estimate;
+  const trip = {
+    id: crypto.randomUUID(),
+    tripDate: values.tripDate,
+    mapUrl: values.mapUrl,
+    distanceKm: values.distance,
+    efficiencyKmPerLiter: values.efficiency,
+    fuelPricePerLiter: values.fuelPrice,
+    marginPercent: values.margin,
+    minimumFuelLiter: estimate.minimumFuelLiter,
+    recommendedFuelLiter: estimate.recommendedFuelLiter,
+    estimatedCost: estimate.estimatedCost,
+    isRefueled: false,
+    createdAt: new Date().toISOString(),
+    refueledAt: null
+  };
+  state.trips.unshift(trip);
   try {
-    tripId = crypto.randomUUID();
-    const values = state.currentEstimate.values;
-    const estimate = state.currentEstimate.estimate;
-    state.trips.unshift({
-      id: tripId,
-      tripDate: fields.tripDate.value,
-      mapUrl: fields.mapUrl.value.trim(),
-      distanceKm: values.distance,
-      efficiencyKmPerLiter: values.efficiency,
-      fuelPricePerLiter: values.fuelPrice,
-      marginPercent: values.margin,
-      minimumFuelLiter: estimate.minimumFuelLiter,
-      recommendedFuelLiter: estimate.recommendedFuelLiter,
-      estimatedCost: estimate.estimatedCost,
-      isRefueled: false,
-      createdAt: new Date().toISOString(),
-      refueledAt: null
-    });
     await writeTripsFile();
-    showMessage(historyElements.saveMessage, "Trip saved to trips.json.");
-    await renderHistory();
+    state.showAllTrips = false;
+    renderHistory();
+    renderAnalytics();
+    showToast("Trip saved successfully.");
   } catch (error) {
-    if (tripId) state.trips = state.trips.filter((trip) => trip.id !== tripId);
-    showMessage(historyElements.saveMessage, `Could not save trip: ${error.message}`, true);
+    state.trips = state.trips.filter((item) => item.id !== trip.id);
+    showToast(`Could not save trip: ${error.message}`, true);
   } finally {
     updateSaveButton();
   }
 }
 
-async function updateRefuelStatus(id, isRefueled) {
+function getTripTimestamp(trip) {
+  const date = Date.parse(`${trip.tripDate || ""}T00:00:00`);
+  if (Number.isFinite(date)) return date;
+  const created = Date.parse(trip.createdAt || "");
+  return Number.isFinite(created) ? created : 0;
+}
+
+function sortTripsNewest(trips) {
+  return [...trips].sort((a, b) => getTripTimestamp(b) - getTripTimestamp(a));
+}
+
+function createStatusBadge(trip) {
+  const badge = document.createElement("span");
+  badge.className = `status-badge ${trip.isRefueled ? "status-refueled" : "status-pending"}`;
+  badge.textContent = trip.isRefueled ? "Refueled" : "Not refueled";
+  return badge;
+}
+
+function createActionMenu(trip) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "action-menu";
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "menu-trigger";
+  trigger.textContent = "\u22ef";
+  trigger.setAttribute("aria-label", `Actions for trip on ${formatDate(trip.tripDate)}`);
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.setAttribute("aria-haspopup", "menu");
+
+  const menu = document.createElement("div");
+  menu.className = "menu-popover";
+  menu.setAttribute("role", "menu");
+  menu.hidden = true;
+  if (isSafeMapUrl(trip.mapUrl)) {
+    const routeLink = document.createElement("a");
+    routeLink.className = "menu-item";
+    routeLink.href = trip.mapUrl;
+    routeLink.target = "_blank";
+    routeLink.rel = "noopener noreferrer";
+    routeLink.textContent = "Open route";
+    routeLink.setAttribute("role", "menuitem");
+    menu.append(routeLink);
+  }
+  const statusButton = document.createElement("button");
+  statusButton.type = "button";
+  statusButton.className = "menu-item";
+  statusButton.dataset.action = "toggle-refuel";
+  statusButton.dataset.id = trip.id;
+  statusButton.setAttribute("role", "menuitem");
+  statusButton.disabled = !state.hasWriteAccess;
+  statusButton.textContent = trip.isRefueled ? "Mark as not refueled" : "Mark as refueled";
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "menu-item menu-item-danger";
+  deleteButton.dataset.action = "delete";
+  deleteButton.dataset.id = trip.id;
+  deleteButton.setAttribute("role", "menuitem");
+  deleteButton.disabled = !state.hasWriteAccess;
+  deleteButton.textContent = "Delete trip";
+  menu.append(statusButton, deleteButton);
+
+  trigger.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const willOpen = menu.hidden;
+    closeActionMenus();
+    menu.hidden = !willOpen;
+    trigger.setAttribute("aria-expanded", String(willOpen));
+  });
+  wrapper.append(trigger, menu);
+  return wrapper;
+}
+
+function renderHistory() {
+  elements.tableBody.replaceChildren();
+  elements.cardList.replaceChildren();
+  renderOutstandingTotals();
+  const sorted = sortTripsNewest(state.trips);
+  const visibleTrips = state.showAllTrips ? sorted : sorted.slice(0, RECENT_TRIP_LIMIT);
+  const hasTrips = sorted.length > 0;
+
+  elements.tableWrapper.hidden = !hasTrips;
+  elements.cardList.hidden = !hasTrips;
+  elements.emptyHistory.hidden = hasTrips;
+  elements.viewAllTrips.hidden = sorted.length <= RECENT_TRIP_LIMIT;
+  elements.viewAllTrips.textContent = state.showAllTrips ? "Show recent trips" : `View all trips (${sorted.length})`;
+
+  visibleTrips.forEach((trip) => {
+    const row = document.createElement("tr");
+    const values = [
+      formatDate(trip.tripDate),
+      `${formatNumber(trip.distanceKm)} km`,
+      `${formatFuel(trip.recommendedFuelLiter)} L`,
+      formatCurrency(trip.estimatedCost)
+    ];
+    values.forEach((value) => {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    });
+    const statusCell = document.createElement("td");
+    statusCell.append(createStatusBadge(trip));
+    const actionCell = document.createElement("td");
+    actionCell.append(createActionMenu(trip));
+    row.append(statusCell, actionCell);
+    elements.tableBody.append(row);
+
+    const card = document.createElement("article");
+    card.className = "trip-card";
+    const top = document.createElement("div");
+    top.className = "trip-card-top";
+    const heading = document.createElement("div");
+    const date = document.createElement("p");
+    date.className = "trip-card-date";
+    date.textContent = formatDate(trip.tripDate);
+    heading.append(date, createStatusBadge(trip));
+    top.append(heading, createActionMenu(trip));
+    const stats = document.createElement("div");
+    stats.className = "trip-card-stats";
+    [
+      ["Distance", `${formatNumber(trip.distanceKm)} km`],
+      ["Fuel", `${formatFuel(trip.recommendedFuelLiter)} L`],
+      ["Cost", formatCurrency(trip.estimatedCost)]
+    ].forEach(([label, value]) => {
+      const block = document.createElement("div");
+      const labelElement = document.createElement("span");
+      const valueElement = document.createElement("strong");
+      labelElement.textContent = label;
+      valueElement.textContent = value;
+      block.append(labelElement, valueElement);
+      stats.append(block);
+    });
+    card.append(top, stats);
+    elements.cardList.append(card);
+  });
+}
+
+function renderOutstandingTotals() {
+  const pending = state.trips.filter((trip) => !trip.isRefueled);
+  const fuel = pending.reduce((sum, trip) => sum + (Number(trip.recommendedFuelLiter) || 0), 0);
+  const cost = pending.reduce((sum, trip) => sum + (Number(trip.estimatedCost) || 0), 0);
+  elements.outstandingFuel.textContent = `${formatFuel(fuel)} L`;
+  elements.outstandingCost.textContent = formatCurrency(cost);
+}
+
+function closeActionMenus() {
+  document.querySelectorAll(".menu-popover:not([hidden])").forEach((menu) => { menu.hidden = true; });
+  document.querySelectorAll(".menu-trigger[aria-expanded='true']").forEach((button) => button.setAttribute("aria-expanded", "false"));
+}
+
+async function updateRefuelStatus(id) {
   if (!state.hasWriteAccess) return;
   const trip = state.trips.find((item) => item.id === id);
   if (!trip) return;
   const previous = trip.isRefueled;
-  trip.isRefueled = isRefueled;
-  trip.refueledAt = isRefueled ? new Date().toISOString() : null;
+  trip.isRefueled = !trip.isRefueled;
+  trip.refueledAt = trip.isRefueled ? new Date().toISOString() : null;
   try {
     await writeTripsFile();
-    await renderHistory();
+    renderHistory();
+    renderAnalytics();
+    showToast(trip.isRefueled ? "Trip marked as refueled." : "Trip marked as not refueled.");
   } catch (error) {
     trip.isRefueled = previous;
-    showMessage(historyElements.historyMessage, `Could not update trip: ${error.message}`, true);
-    await renderHistory();
+    showToast(`Could not update trip: ${error.message}`, true);
   }
 }
 
-async function deleteTrip(id) {
-  if (!state.hasWriteAccess) return;
+function requestTripDeletion(id) {
+  state.deleteTripId = id;
+  closeActionMenus();
+  if (typeof elements.deleteDialog.showModal === "function") elements.deleteDialog.showModal();
+  else if (window.confirm("Delete this trip permanently?")) confirmTripDeletion();
+}
+
+async function confirmTripDeletion() {
+  const id = state.deleteTripId;
   const trip = state.trips.find((item) => item.id === id);
-  if (!trip || !window.confirm(`Delete trip from ${formatDate(trip.tripDate)}?`)) return;
-  const previousTrips = [...state.trips];
+  if (!trip || !state.hasWriteAccess) return;
+  const previous = [...state.trips];
   state.trips = state.trips.filter((item) => item.id !== id);
+  if (elements.deleteDialog.open) elements.deleteDialog.close();
+  state.deleteTripId = null;
   try {
     await writeTripsFile();
-    await renderHistory();
+    renderHistory();
+    renderAnalytics();
+    showToast("Trip deleted.");
   } catch (error) {
-    state.trips = previousTrips;
-    showMessage(historyElements.historyMessage, `Could not delete trip: ${error.message}`, true);
-    await renderHistory();
+    state.trips = previous;
+    renderHistory();
+    renderAnalytics();
+    showToast(`Could not delete trip: ${error.message}`, true);
   }
 }
 
-async function renderHistory() {
-  historyElements.list.replaceChildren();
-  renderOutstandingTotals();
-  renderCostChart();
-  historyElements.empty.hidden = state.trips.length > 0;
-  historyElements.tableWrapper.hidden = state.trips.length === 0;
-  if (!state.trips.length) {
-    historyElements.empty.textContent = state.directoryHandle ? "No trips saved yet." : "Connect the project folder to load and save trip history.";
-    return;
-  }
+function renderAnalytics() {
+  const count = state.trips.length;
+  const totalFuel = state.trips.reduce((sum, trip) => sum + (Number(trip.recommendedFuelLiter) || 0), 0);
+  const totalSpending = state.trips.reduce((sum, trip) => sum + (Number(trip.estimatedCost) || 0), 0);
+  const totalDistance = state.trips.reduce((sum, trip) => sum + (Number(trip.distanceKm) || 0), 0);
+  elements.summaryFuel.textContent = `${formatFuel(totalFuel)} L`;
+  elements.summarySpending.textContent = formatCurrency(totalSpending);
+  elements.summaryAverage.textContent = formatCurrency(count ? totalSpending / count : 0);
+  elements.summaryDistance.textContent = `${formatNumber(totalDistance)} km`;
+  renderAnalyticsChart();
+}
 
-  for (const trip of state.trips) {
-    const row = document.createElement("tr");
-    if (trip.isRefueled) row.classList.add("refueled");
-    const dateCell = document.createElement("td");
-    dateCell.textContent = formatDate(trip.tripDate);
-    const distanceCell = document.createElement("td");
-    distanceCell.textContent = `${formatNumber(Number(trip.distanceKm) || 0)} km`;
-    const fuelCell = document.createElement("td");
-    fuelCell.textContent = `${formatNumber(Number(trip.recommendedFuelLiter) || 0)} L`;
-    const costCell = document.createElement("td");
-    costCell.textContent = formatCurrency(Number(trip.estimatedCost) || 0);
-    const refuelCell = document.createElement("td");
-    const checkLabel = document.createElement("label");
-    checkLabel.className = "refuel-check";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = Boolean(trip.isRefueled);
-    checkbox.disabled = !state.hasWriteAccess;
-    if (!state.hasWriteAccess) checkbox.title = "Connect the project folder to update this status.";
-    checkbox.addEventListener("change", () => updateRefuelStatus(trip.id, checkbox.checked));
-    checkLabel.append(checkbox, document.createTextNode("Done"));
-    refuelCell.append(checkLabel);
-    const actionCell = document.createElement("td");
-    const actions = document.createElement("div");
-    actions.className = "trip-actions";
-    if (isSafeMapUrl(trip.mapUrl)) {
-      const mapLink = document.createElement("a");
-      mapLink.className = "button button-ghost";
-      mapLink.href = trip.mapUrl;
-      mapLink.target = "_blank";
-      mapLink.rel = "noopener noreferrer";
-      mapLink.textContent = "Open map";
-      actions.append(mapLink);
+function getFilteredChartTrips() {
+  const sorted = [...state.trips].sort((a, b) => getTripTimestamp(a) - getTripTimestamp(b));
+  if (state.chartPeriod === "all") return sorted;
+  const days = Number(state.chartPeriod);
+  const threshold = Date.now() - (days * 24 * 60 * 60 * 1000);
+  return sorted.filter((trip) => getTripTimestamp(trip) >= threshold);
+}
+
+function getMetricDefinition() {
+  const definitions = {
+    cost: {
+      title: "Estimated cost by trip date",
+      value: (trip) => Number(trip.estimatedCost) || 0,
+      format: formatCurrency,
+      axis: (value) => `Rp${new Intl.NumberFormat("id-ID", { notation: "compact", maximumFractionDigits: 1 }).format(value)}`
+    },
+    fuel: {
+      title: "Fuel used by trip date",
+      value: (trip) => Number(trip.recommendedFuelLiter) || 0,
+      format: (value) => `${formatFuel(value)} L`,
+      axis: (value) => `${formatNumber(value, 1)} L`
+    },
+    distance: {
+      title: "Distance traveled by trip date",
+      value: (trip) => Number(trip.distanceKm) || 0,
+      format: (value) => `${formatNumber(value)} km`,
+      axis: (value) => `${formatNumber(value, 0)} km`
     }
-    const deleteButton = document.createElement("button");
-    deleteButton.className = "button button-danger";
-    deleteButton.type = "button";
-    deleteButton.textContent = "Delete";
-    deleteButton.disabled = !state.hasWriteAccess;
-    if (!state.hasWriteAccess) deleteButton.title = "Connect the project folder to delete this trip.";
-    deleteButton.addEventListener("click", () => deleteTrip(trip.id));
-    actions.append(deleteButton);
-    actionCell.append(actions);
-    row.append(dateCell, distanceCell, fuelCell, costCell, refuelCell, actionCell);
-    historyElements.list.append(row);
-  }
+  };
+  return definitions[state.chartMetric];
+}
+
+function niceStep(value) {
+  if (!Number.isFinite(value) || value <= 0) return 1;
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  const normalized = value / magnitude;
+  const multiplier = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return multiplier * magnitude;
 }
 
 function createSvgElement(name, attributes = {}) {
@@ -423,110 +690,67 @@ function createSvgElement(name, attributes = {}) {
   return element;
 }
 
-function getTripTimestamp(trip) {
-  const dateTimestamp = Date.parse(`${trip.tripDate || ""}T00:00:00`);
-  if (Number.isFinite(dateTimestamp)) return dateTimestamp;
-  const createdTimestamp = Date.parse(trip.createdAt || "");
-  return Number.isFinite(createdTimestamp) ? createdTimestamp : 0;
-}
-
-function formatCompactCurrency(value) {
-  return new Intl.NumberFormat("id-ID", {
-    notation: "compact",
-    maximumFractionDigits: 1
-  }).format(value);
-}
-
-function renderCostChart() {
-  const svg = historyElements.chartSvg;
+function renderAnalyticsChart() {
+  const svg = elements.chartSvg;
   svg.replaceChildren();
   hideChartTooltip();
+  const trips = getFilteredChartTrips();
+  const metric = getMetricDefinition();
+  elements.chartTitle.textContent = metric.title;
+  elements.chartContainer.hidden = trips.length === 0;
+  elements.chartEmpty.hidden = trips.length > 0;
+  if (!trips.length) return;
 
-  if (!state.trips.length) {
-    historyElements.chart.hidden = true;
-    historyElements.chartEmpty.hidden = false;
-    historyElements.chartEmpty.textContent = state.directoryHandle
-      ? "Save at least one trip to display the cost trend."
-      : "Connect the project folder to display the cost trend.";
-    return;
-  }
-
-  historyElements.chart.hidden = false;
-  historyElements.chartEmpty.hidden = true;
-  const trips = [...state.trips].sort((a, b) => getTripTimestamp(a) - getTripTimestamp(b));
   const width = 960;
-  const height = 340;
-  const margin = { top: 24, right: 28, bottom: 54, left: 82 };
+  const height = 330;
+  const margin = { top: 22, right: 26, bottom: 50, left: 78 };
   const plotWidth = width - margin.left - margin.right;
   const plotHeight = height - margin.top - margin.bottom;
-  const maximumCost = Math.max(...trips.map((trip) => Number(trip.estimatedCost) || 0), 1);
-  const yMaximum = maximumCost * 1.12;
-  const xForIndex = (index) => trips.length === 1
-    ? margin.left + plotWidth / 2
-    : margin.left + (index / (trips.length - 1)) * plotWidth;
-  const yForCost = (cost) => margin.top + plotHeight - ((Number(cost) || 0) / yMaximum) * plotHeight;
+  const maximum = Math.max(...trips.map(metric.value), 1);
+  const step = niceStep(maximum / 3);
+  const yMaximum = Math.max(step * Math.ceil(maximum / step), step);
+  const xAt = (index) => trips.length === 1 ? margin.left + plotWidth / 2 : margin.left + (index / (trips.length - 1)) * plotWidth;
+  const yAt = (value) => margin.top + plotHeight - (value / yMaximum) * plotHeight;
 
   const defs = createSvgElement("defs");
-  const gradient = createSvgElement("linearGradient", { id: "cost-area-gradient", x1: "0", y1: "0", x2: "0", y2: "1" });
+  const gradient = createSvgElement("linearGradient", { id: "chart-area-gradient", x1: "0", y1: "0", x2: "0", y2: "1" });
   gradient.append(
-    createSvgElement("stop", { offset: "0%", "stop-color": "#087f5b", "stop-opacity": ".28" }),
-    createSvgElement("stop", { offset: "100%", "stop-color": "#087f5b", "stop-opacity": ".02" })
+    createSvgElement("stop", { offset: "0%", "stop-color": "#07835f", "stop-opacity": ".22" }),
+    createSvgElement("stop", { offset: "100%", "stop-color": "#07835f", "stop-opacity": ".01" })
   );
   defs.append(gradient);
   svg.append(defs);
 
-  const yTickCount = 4;
-  for (let index = 0; index <= yTickCount; index += 1) {
-    const value = (yMaximum / yTickCount) * index;
-    const y = yForCost(value);
-    svg.append(createSvgElement("line", {
-      x1: margin.left,
-      y1: y,
-      x2: width - margin.right,
-      y2: y,
-      class: "chart-grid-line"
-    }));
-    const label = createSvgElement("text", {
-      x: margin.left - 12,
-      y: y + 4,
-      "text-anchor": "end",
-      class: "chart-axis-label"
-    });
-    label.textContent = `Rp${formatCompactCurrency(value)}`;
+  for (let index = 0; index <= 3; index += 1) {
+    const value = (yMaximum / 3) * index;
+    const y = yAt(value);
+    svg.append(createSvgElement("line", { x1: margin.left, y1: y, x2: width - margin.right, y2: y, class: "chart-grid-line" }));
+    const label = createSvgElement("text", { x: margin.left - 11, y: y + 4, "text-anchor": "end", class: "chart-axis-label" });
+    label.textContent = metric.axis(value);
     svg.append(label);
   }
-
   svg.append(
     createSvgElement("line", { x1: margin.left, y1: margin.top, x2: margin.left, y2: height - margin.bottom, class: "chart-axis-line" }),
     createSvgElement("line", { x1: margin.left, y1: height - margin.bottom, x2: width - margin.right, y2: height - margin.bottom, class: "chart-axis-line" })
   );
 
-  const points = trips.map((trip, index) => ({
-    trip,
-    x: xForIndex(index),
-    y: yForCost(trip.estimatedCost)
-  }));
-  const linePoints = points.map((point) => `${point.x},${point.y}`).join(" ");
+  const points = trips.map((trip, index) => ({ trip, value: metric.value(trip), x: xAt(index), y: yAt(metric.value(trip)) }));
+  const coordinates = points.map((point) => `${point.x},${point.y}`).join(" ");
   if (points.length > 1) {
-    const areaPoints = `${margin.left},${height - margin.bottom} ${linePoints} ${width - margin.right},${height - margin.bottom}`;
-    svg.append(createSvgElement("polygon", { points: areaPoints, class: "chart-area" }));
-    svg.append(createSvgElement("polyline", { points: linePoints, class: "chart-line" }));
+    svg.append(createSvgElement("polygon", {
+      points: `${points[0].x},${height - margin.bottom} ${coordinates} ${points.at(-1).x},${height - margin.bottom}`,
+      class: "chart-area"
+    }));
+    svg.append(createSvgElement("polyline", { points: coordinates, class: "chart-line" }));
   }
 
-  const maximumLabels = 6;
-  const labelStep = Math.max(1, Math.ceil(trips.length / maximumLabels));
+  const labelStep = Math.max(1, Math.ceil(points.length / 6));
   points.forEach((point, index) => {
     if (index % labelStep === 0 || index === points.length - 1) {
-      const label = createSvgElement("text", {
-        x: point.x,
-        y: height - margin.bottom + 25,
-        "text-anchor": "middle",
-        class: "chart-axis-label"
-      });
+      const label = createSvgElement("text", { x: point.x, y: height - margin.bottom + 24, "text-anchor": "middle", class: "chart-axis-label" });
       label.textContent = formatShortDate(point.trip.tripDate);
       svg.append(label);
     }
-
     const circle = createSvgElement("circle", {
       cx: point.x,
       cy: point.y,
@@ -534,137 +758,203 @@ function renderCostChart() {
       class: "chart-point",
       tabindex: "0",
       role: "button",
-      "aria-label": getChartPointLabel(point.trip)
+      "aria-label": `${formatDate(point.trip.tripDate)}, ${metric.format(point.value)}`
     });
-    circle.addEventListener("mouseenter", () => showChartTooltip(point));
-    circle.addEventListener("mousemove", () => showChartTooltip(point));
+    circle.addEventListener("mouseenter", () => showChartTooltip(point, metric));
+    circle.addEventListener("mousemove", () => showChartTooltip(point, metric));
     circle.addEventListener("mouseleave", hideChartTooltip);
-    circle.addEventListener("focus", () => showChartTooltip(point));
+    circle.addEventListener("focus", () => showChartTooltip(point, metric));
     circle.addEventListener("blur", hideChartTooltip);
     svg.append(circle);
   });
 }
 
-function formatShortDate(value) {
-  const date = new Date(`${value || ""}T00:00:00`);
-  return Number.isNaN(date.getTime())
-    ? "No date"
-    : new Intl.DateTimeFormat("id-ID", { day: "2-digit", month: "short" }).format(date);
-}
-
-function getChartPointLabel(trip) {
-  return `${formatDate(trip.tripDate)}: ${formatCurrency(Number(trip.estimatedCost) || 0)}, ` +
-    `${formatNumber(Number(trip.distanceKm) || 0)} km, ` +
-    `${formatNumber(Number(trip.efficiencyKmPerLiter) || 0)} km/L, ` +
-    `${formatCurrency(Number(trip.fuelPricePerLiter) || 0)} per liter, ` +
-    `${formatNumber(Number(trip.recommendedFuelLiter) || 0)} liters recommended.`;
-}
-
-function showChartTooltip(point) {
-  const tooltip = historyElements.chartTooltip;
-  tooltip.replaceChildren();
+function showChartTooltip(point, metric) {
+  elements.chartTooltip.replaceChildren();
   const title = document.createElement("strong");
-  title.textContent = `${formatDate(point.trip.tripDate)} - ${formatCurrency(Number(point.trip.estimatedCost) || 0)}`;
-  const details = document.createElement("dl");
-  const values = [
-    ["Distance", `${formatNumber(Number(point.trip.distanceKm) || 0)} km`],
-    ["Efficiency", `${formatNumber(Number(point.trip.efficiencyKmPerLiter) || 0)} km/L`],
-    ["Fuel price", `${formatCurrency(Number(point.trip.fuelPricePerLiter) || 0)}/L`],
-    ["Recommended", `${formatNumber(Number(point.trip.recommendedFuelLiter) || 0)} L`]
-  ];
-  values.forEach(([label, value]) => {
-    const term = document.createElement("dt");
-    const description = document.createElement("dd");
-    term.textContent = label;
-    description.textContent = value;
-    details.append(term, description);
-  });
-  tooltip.append(title, details);
-  tooltip.hidden = false;
-  tooltip.style.left = `${(point.x / 960) * 100}%`;
-  tooltip.style.top = `${(point.y / 340) * 100}%`;
-  tooltip.style.transform = point.x < 180
-    ? "translate(0, calc(-100% - 14px))"
-    : point.x > 780
-      ? "translate(-100%, calc(-100% - 14px))"
-      : "translate(-50%, calc(-100% - 14px))";
+  const detail = document.createElement("span");
+  title.textContent = metric.format(point.value);
+  detail.textContent = `${formatDate(point.trip.tripDate)} \u00b7 ` +
+    `${formatNumber(point.trip.distanceKm)} km \u00b7 ` +
+    `${formatNumber(point.trip.efficiencyKmPerLiter)} km/L \u00b7 ` +
+    `${formatCurrency(point.trip.fuelPricePerLiter)}/L \u00b7 ` +
+    `${formatFuel(point.trip.recommendedFuelLiter)} L recommended`;
+  elements.chartTooltip.append(title, detail);
+  elements.chartTooltip.hidden = false;
+  elements.chartTooltip.style.left = `${(point.x / 960) * 100}%`;
+  elements.chartTooltip.style.top = `${(point.y / 330) * 100}%`;
+  elements.chartTooltip.style.transform = point.x < 170
+    ? "translate(0, calc(-100% - 12px))"
+    : point.x > 790
+      ? "translate(-100%, calc(-100% - 12px))"
+      : "translate(-50%, calc(-100% - 12px))";
 }
 
 function hideChartTooltip() {
-  historyElements.chartTooltip.hidden = true;
+  elements.chartTooltip.hidden = true;
 }
 
-function renderOutstandingTotals() {
-  const outstanding = state.trips.filter((trip) => !trip.isRefueled);
-  const liters = outstanding.reduce((total, trip) => total + (Number(trip.recommendedFuelLiter) || 0), 0);
-  const cost = outstanding.reduce((total, trip) => total + (Number(trip.estimatedCost) || 0), 0);
-  historyElements.outstandingLiters.textContent = `${formatNumber(liters)} L`;
-  historyElements.outstandingCost.textContent = formatCurrency(cost);
+function activateTab(tab) {
+  elements.tabs.forEach((item) => {
+    const active = item === tab;
+    item.classList.toggle("is-active", active);
+    item.setAttribute("aria-selected", String(active));
+    item.tabIndex = active ? 0 : -1;
+  });
+  elements.panels.forEach((panel) => { panel.hidden = panel.id !== tab.dataset.tab; });
+  if (tab.dataset.tab === "analytics-panel") renderAnalyticsChart();
 }
 
-function isSafeMapUrl(value) {
-  try {
-    const url = new URL(value);
-    const hostname = url.hostname.toLowerCase();
-    const isGoogleHost = hostname === "google.com" || hostname.endsWith(".google.com") || hostname === "maps.app.goo.gl";
-    return url.protocol === "https:" && isGoogleHost;
-  } catch (error) { return false; }
+function setInlineMessage(message, isError = false) {
+  elements.historyMessage.textContent = message;
+  elements.historyMessage.classList.toggle("error", isError);
 }
 
-function updateSaveButton() {
-  historyElements.saveTrip.disabled = !state.hasWriteAccess || !state.currentEstimate;
+function clearInlineMessage() {
+  setInlineMessage("");
 }
 
-function showMessage(element, message, isError = false) {
-  element.textContent = message;
-  element.classList.toggle("error", isError);
+async function initializeHistory() {
+  await restoreDirectoryConnection();
+  if (!state.hasWriteAccess) await loadTripsReadOnly();
 }
 
-function clearMessage(element) {
-  showMessage(element, "");
-}
+elements.form.addEventListener("input", (event) => {
+  if (!event.target.name) return;
+  state.touchedFields.add(event.target.name);
+  invalidateEstimateIfNeeded(event.target.name);
+  if (event.target === fields.margin) updateQuickOptions();
+  if (event.target === fields.mapUrl) updateMapLink();
+  const errors = validateForm(getFormValues());
+  renderValidation(errors);
+  saveFormPreferences();
+});
 
-form.addEventListener("submit", (event) => {
+elements.form.addEventListener("focusout", (event) => {
+  if (!event.target.name) return;
+  state.touchedFields.add(event.target.name);
+  if (event.target === fields.fuelPrice) formatFuelPriceInput();
+  renderValidation(validateForm(getFormValues()));
+});
+
+elements.form.addEventListener("submit", (event) => {
   event.preventDefault();
-  const values = getNumericValues();
-  const errors = validateInputs(values, fields.mapUrl.value.trim());
-  renderErrors(errors);
-  saveInputs();
+  const values = getFormValues();
+  const errors = validateForm(values);
   if (Object.keys(errors).length) {
-    clearResults();
-    results.status.textContent = "Correct the highlighted fields to calculate your estimate.";
+    Object.keys(fields).forEach((name) => state.touchedFields.add(name));
+    renderValidation(errors, true);
+    fields[Object.keys(errors)[0]].focus();
     return;
   }
-  const estimate = calculateEstimate(values);
+  const estimate = calculateFuelEstimate(values);
   state.currentEstimate = { values, estimate };
   renderResult(values, estimate);
-  updateSaveButton();
-  clearMessage(historyElements.saveMessage);
+  updateSaveButton({});
+  saveFormPreferences();
 });
 
-form.addEventListener("input", (event) => {
-  saveInputs();
-  if (numericFields.includes(event.target.name)) {
-    state.currentEstimate = null;
-    updateSaveButton();
-  }
-});
-
-form.addEventListener("reset", () => {
+elements.form.addEventListener("reset", () => {
   window.setTimeout(() => {
-    fields.margin.value = "10";
     fields.tripDate.value = new Date().toISOString().slice(0, 10);
-    renderErrors({});
-    clearResults();
-    try { localStorage.removeItem(STORAGE_KEY); } catch (error) { /* Storage may be unavailable. */ }
+    fields.mapUrl.value = "";
+    fields.distance.value = "200";
+    fields.efficiency.value = "40";
+    fields.fuelPrice.value = "10.000";
+    fields.margin.value = "10";
+    state.currentEstimate = null;
+    state.touchedFields.clear();
+    updateQuickOptions();
+    updateMapLink();
+    renderSampleResult();
+    renderValidation(validateForm(getFormValues()));
+    try { localStorage.removeItem(STORAGE_KEY); } catch (error) { /* Preferences are optional. */ }
   }, 0);
 });
 
-historyElements.chooseFolder.addEventListener("click", () => {
-  if (state.directoryHandle && historyElements.folderStatus.textContent.startsWith("Project folder remembered:")) reconnectRememberedFolder();
-  else chooseDataFolder();
+elements.quickOptions.forEach((button) => {
+  button.addEventListener("click", () => {
+    fields.margin.value = button.dataset.margin;
+    state.touchedFields.add("margin");
+    state.currentEstimate = null;
+    updateQuickOptions();
+    renderValidation(validateForm(getFormValues()));
+    saveFormPreferences();
+  });
 });
-historyElements.saveTrip.addEventListener("click", saveCurrentTrip);
 
-restoreInputs();
+elements.saveTrip.addEventListener("click", saveCurrentTrip);
+elements.chooseFolder.addEventListener("click", () => {
+  if (state.directoryHandle && !state.hasWriteAccess) reconnectRememberedFolder();
+  else chooseProjectFolder();
+});
+elements.viewAllTrips.addEventListener("click", () => {
+  state.showAllTrips = !state.showAllTrips;
+  renderHistory();
+});
+
+elements.tabs.forEach((tab, index) => {
+  tab.addEventListener("click", () => activateTab(tab));
+  tab.addEventListener("keydown", (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    let targetIndex = index;
+    if (event.key === "ArrowRight") targetIndex = (index + 1) % elements.tabs.length;
+    if (event.key === "ArrowLeft") targetIndex = (index - 1 + elements.tabs.length) % elements.tabs.length;
+    if (event.key === "Home") targetIndex = 0;
+    if (event.key === "End") targetIndex = elements.tabs.length - 1;
+    activateTab(elements.tabs[targetIndex]);
+    elements.tabs[targetIndex].focus();
+  });
+});
+
+elements.metricButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    state.chartMetric = button.dataset.metric;
+    elements.metricButtons.forEach((item) => item.classList.toggle("is-selected", item === button));
+    renderAnalyticsChart();
+  });
+});
+
+elements.periodButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    state.chartPeriod = button.dataset.period;
+    elements.periodButtons.forEach((item) => item.classList.toggle("is-selected", item === button));
+    renderAnalyticsChart();
+  });
+});
+
+document.addEventListener("click", (event) => {
+  const action = event.target.closest("[data-action]");
+  if (action) {
+    const id = action.dataset.id;
+    if (action.dataset.action === "toggle-refuel") updateRefuelStatus(id);
+    if (action.dataset.action === "delete") requestTripDeletion(id);
+    closeActionMenus();
+    return;
+  }
+  if (!event.target.closest(".action-menu")) closeActionMenus();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeActionMenus();
+});
+
+elements.cancelDelete.addEventListener("click", () => {
+  elements.deleteDialog.close();
+  state.deleteTripId = null;
+});
+elements.confirmDelete.addEventListener("click", confirmTripDeletion);
+elements.deleteDialog.addEventListener("click", (event) => {
+  if (event.target === elements.deleteDialog) {
+    elements.deleteDialog.close();
+    state.deleteTripId = null;
+  }
+});
+
+restoreFormPreferences();
+renderSampleResult();
+renderValidation(validateForm(getFormValues()));
+renderHistory();
+renderAnalytics();
 initializeHistory();
