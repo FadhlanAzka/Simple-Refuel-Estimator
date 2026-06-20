@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Estimate post-trip fuel usage and refuel cost from a manually entered distance.">
+  <title>Simple Refuel Estimator</title>
+  <link rel="stylesheet" href="style.css?v=1.8">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <p class="eyebrow">Post-trip calculator</p>
+      <h1>Simple Refuel Estimator</h1>
+      <p class="intro">Open your completed route in Google Maps, then enter the actual trip distance to estimate fuel usage and refuel cost.</p>
+    </div>
+  </header>
+
+  <main class="container">
+    <div class="app-layout">
+      <section class="card map-card" aria-labelledby="map-heading">
+        <div class="section-heading">
+          <div>
+            <p class="step">Step 1</p>
+            <h2 id="map-heading">Review your route</h2>
+          </div>
+          <span class="map-badge">Google Maps</span>
+        </div>
+
+        <p class="helper-text">Set or review your route in Google Maps, check the total distance, then enter it manually in the calculator.</p>
+
+        <div class="map-frame">
+          <iframe
+            title="Google Maps visualization near the example route"
+            src="https://www.google.com/maps?q=-6.9049296%2C107.614575&amp;z=16&amp;output=embed"
+            loading="lazy"
+            referrerpolicy="no-referrer-when-downgrade"
+            allowfullscreen>
+          </iframe>
+        </div>
+
+        <a
+          class="button button-primary map-link"
+          href="https://www.google.com/maps/place/Bandung,+Kota+Bandung,+Jawa+Barat/@-6.9033625,107.601958,18855m/data=!3m2!1e3!4b1!4m6!3m5!1s0x2e68e6398252477f:0x146a1f93d3e815b2!8m2!3d-6.9174639!4d107.6191228!16zL20vMDF6bGw4?entry=ttu&g_ep=EgoyMDI2MDYxMC4wIKXMDSoASAFQAw%3D%3D"
+          target="_blank"
+          rel="noopener noreferrer">
+          Open route in Google Maps
+        </a>
+
+        <p class="map-note">The map is for visual reference only. This app does not read, scrape, or calculate distance from Google Maps.</p>
+      </section>
+
+      <section class="card calculator-card" aria-labelledby="calculator-heading">
+        <div class="section-heading">
+          <div>
+            <p class="step">Step 2</p>
+            <h2 id="calculator-heading">Enter trip details</h2>
+          </div>
+        </div>
+
+        <form id="calculator-form" novalidate>
+          <div class="form-grid">
+            <div class="field-group">
+              <label for="trip-date">Trip date</label>
+              <input id="trip-date" name="tripDate" type="date">
+            </div>
+
+            <div class="field-group">
+              <label for="map-url">Google Maps route link</label>
+              <input id="map-url" name="mapUrl" type="url" placeholder="https://www.google.com/maps/..." autocomplete="off" required aria-describedby="map-url-error">
+              <p id="map-url-error" class="error-message" role="alert"></p>
+            </div>
+
+            <div class="field-group field-full">
+              <label for="distance">Total distance <span>km</span></label>
+              <input id="distance" name="distance" type="text" inputmode="decimal" placeholder="26.6" autocomplete="off" aria-describedby="distance-help distance-error">
+              <p id="distance-help" class="field-help">Enter the distance shown in Google Maps or your vehicle's actual trip reading.</p>
+              <p id="distance-error" class="error-message" role="alert"></p>
+            </div>
+
+            <div class="field-group">
+              <label for="efficiency">Fuel efficiency <span>km/L</span></label>
+              <input id="efficiency" name="efficiency" type="text" inputmode="decimal" placeholder="12" autocomplete="off" aria-describedby="efficiency-error">
+              <p id="efficiency-error" class="error-message" role="alert"></p>
+            </div>
+
+            <div class="field-group">
+              <label for="fuel-price">Fuel price <span>Rp/L</span></label>
+              <input id="fuel-price" name="fuelPrice" type="text" inputmode="decimal" placeholder="10000" autocomplete="off" aria-describedby="fuel-price-error">
+              <p id="fuel-price-error" class="error-message" role="alert"></p>
+            </div>
+
+            <div class="field-group">
+              <label for="margin">Reserve margin <span>%</span></label>
+              <input id="margin" name="margin" type="text" inputmode="decimal" value="10" placeholder="10" autocomplete="off" aria-describedby="margin-help margin-error">
+              <p id="margin-help" class="field-help">Optional. Defaults to 10%.</p>
+              <p id="margin-error" class="error-message" role="alert"></p>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <button class="button button-primary" type="submit">Calculate</button>
+            <button class="button button-ghost" type="reset">Reset</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <section class="results-section" aria-labelledby="results-heading" aria-live="polite">
+      <div class="results-header">
+        <div>
+          <p class="step">Estimate</p>
+          <h2 id="results-heading">Refuel summary</h2>
+        </div>
+        <p id="result-status">Enter your trip details to see an estimate.</p>
+      </div>
+      <div class="result-grid">
+        <article class="result-card"><p>Total distance</p><strong id="result-distance">--</strong></article>
+        <article class="result-card"><p>Minimum fuel needed</p><strong id="result-minimum">--</strong></article>
+        <article class="result-card result-card-highlight"><p>Recommended refuel</p><strong id="result-recommended">--</strong></article>
+        <article class="result-card"><p>Estimated fuel cost</p><strong id="result-cost">--</strong></article>
+      </div>
+
+      <div class="save-trip-panel card">
+        <button id="save-trip" class="button button-primary" type="button" disabled>Save trip to history</button>
+        <p id="save-trip-message" class="status-message" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section class="history-section" aria-labelledby="history-heading">
+      <div class="history-toolbar card">
+        <div>
+          <p class="step">Local history</p>
+          <h2 id="history-heading">Trip history</h2>
+          <p id="folder-status" class="folder-status">Project folder is not connected.</p>
+        </div>
+        <button id="choose-folder" class="button button-primary" type="button">Connect project folder</button>
+      </div>
+
+      <div class="outstanding-grid" aria-label="Outstanding refuel totals">
+        <article class="outstanding-card">
+          <p>Fuel Used Estimation</p>
+          <strong id="outstanding-liters">0,00 L</strong>
+        </article>
+        <article class="outstanding-card">
+          <p>Refuel Price Estimation</p>
+          <strong id="outstanding-cost">Rp0</strong>
+        </article>
+      </div>
+
+      <section class="cost-chart-card card" aria-labelledby="cost-chart-heading">
+        <div class="chart-heading">
+          <div>
+            <p class="step">Cost trend</p>
+            <h3 id="cost-chart-heading">Estimated cost by trip date</h3>
+          </div>
+          <span class="chart-axis-note">X: Trip date &middot; Y: Estimated cost</span>
+        </div>
+        <div id="cost-chart" class="cost-chart" hidden>
+          <svg id="cost-chart-svg" viewBox="0 0 960 340" role="img" aria-labelledby="cost-chart-heading cost-chart-description"></svg>
+          <p id="cost-chart-description" class="visually-hidden">Line graph of estimated fuel cost ordered by trip date. Focus or hover over a point for trip details.</p>
+          <div id="chart-tooltip" class="chart-tooltip" hidden></div>
+        </div>
+        <p id="chart-empty" class="chart-empty">Connect the project folder to display the cost trend.</p>
+      </section>
+
+      <p id="history-message" class="status-message" role="status" aria-live="polite"></p>
+      <div id="trip-table-wrapper" class="trip-table-wrapper" hidden>
+        <table class="trip-table">
+          <thead>
+            <tr>
+              <th scope="col">Trip date</th>
+              <th scope="col">Distance</th>
+              <th scope="col">Recommended fuel</th>
+              <th scope="col">Estimated cost</th>
+              <th scope="col">Refueled</th>
+              <th scope="col">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="trip-history"></tbody>
+        </table>
+      </div>
+      <div id="empty-history" class="empty-history card">Connect the project folder to load and save trip history.</div>
+    </section>
+
+    <section class="card explanation-section" aria-labelledby="explanation-heading">
+      <p class="step">How it works</p>
+      <h2 id="explanation-heading">Calculation formula</h2>
+      <ol>
+        <li>Open or set your completed route in Google Maps.</li>
+        <li>Read the total trip distance and enter it manually.</li>
+        <li>Enter your vehicle efficiency, fuel price, and reserve margin.</li>
+        <li>Calculate the recommended refuel amount and estimated cost.</li>
+      </ol>
+      <div class="formula-grid">
+        <p><span>Minimum fuel</span><code>distance / fuel efficiency</code></p>
+        <p><span>Recommended fuel</span><code>minimum fuel + reserve margin</code></p>
+        <p><span>Estimated cost</span><code>recommended fuel x price per liter</code></p>
+      </div>
+      <p class="disclaimer">This result is an estimate. Actual fuel use may vary with traffic, road conditions, driving style, and vehicle load.</p>
+    </section>
+  </main>
+
+  <footer><div class="container">Distance is entered manually. Trip history is stored in the local folder you authorize.</div></footer>
+  <script src="script.js?v=1.8"></script>
+</body>
+</html>
