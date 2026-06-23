@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="Estimate trip fuel requirements and refueling cost.">
   <title>Simple Refuel Estimator</title>
-  <link rel="stylesheet" href="style.css?v=2.0">
+  <link rel="stylesheet" href="style.css?v=2.1">
 </head>
 <body>
   <header class="site-header">
@@ -153,9 +153,10 @@
           <button id="choose-folder" class="button button-secondary" type="button">Connect project folder</button>
         </div>
         <div class="outstanding-summary" aria-label="Not refueled totals">
-          <span>Not refueled</span>
+          <span>Remaining to refuel</span>
           <strong id="outstanding-fuel">0,00 L</strong>
           <strong id="outstanding-cost">Rp0</strong>
+          <button id="record-global-refuel" class="button button-small" type="button" disabled>Record global refuel</button>
         </div>
         <p id="history-message" class="inline-message" role="status" aria-live="polite"></p>
 
@@ -221,6 +222,26 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
+  <dialog id="global-refuel-dialog" class="confirm-dialog refuel-dialog" aria-labelledby="global-refuel-dialog-title">
+    <h2 id="global-refuel-dialog-title">Record global refuel</h2>
+    <p>Fuel is allocated to the oldest outstanding trips first. A trip is marked refueled when its recommended amount is fully covered.</p>
+    <dl class="refuel-facts">
+      <div><dt>Current unrefueled</dt><dd id="global-outstanding">0,00 L</dd></div>
+      <div><dt>Trips reaching break-even</dt><dd id="global-covered-trips">0 trips</dd></div>
+    </dl>
+    <label for="global-refuel-amount">Fuel refueled now</label>
+    <div class="input-with-suffix">
+      <input id="global-refuel-amount" type="text" inputmode="decimal" placeholder="0,00" aria-describedby="global-refuel-error global-refuel-preview">
+      <span>L</span>
+    </div>
+    <p id="global-refuel-error" class="error-message" role="alert"></p>
+    <p id="global-refuel-preview" class="refuel-remaining">Remaining after allocation: 0,00 L</p>
+    <div class="dialog-actions">
+      <button id="cancel-global-refuel" class="button button-secondary" type="button">Cancel</button>
+      <button id="apply-global-refuel" class="button button-primary" type="button">Apply refuel</button>
+    </div>
+  </dialog>
+
   <dialog id="delete-dialog" class="confirm-dialog" aria-labelledby="delete-dialog-title">
     <h2 id="delete-dialog-title">Delete this trip?</h2>
     <p>This action permanently removes the trip from <code>trips.json</code>.</p>
@@ -231,6 +252,6 @@
   </dialog>
 
   <footer><div class="container">Your trip history stays in the local project folder you authorize.</div></footer>
-  <script src="script.js?v=2.0"></script>
+  <script src="script.js?v=2.1"></script>
 </body>
 </html>

@@ -3,7 +3,7 @@
 ## Document Control
 
 - Product: Simple Refuel Estimator
-- Version: 2.0
+- Version: 2.2
 - Last updated: 2026-06-20
 - Status: Active development
 - Maintenance rule: Update this document whenever product features or requirements change.
@@ -20,7 +20,7 @@ The application stores trip history in the root-level `trips.json`. It can load 
 - Present the recommended fuel amount as the strongest result.
 - Minimize page length and visual clutter.
 - Keep history, analytics, and formulas available without showing all secondary content at once.
-- Track refueled and not-refueled trips.
+- Track global refuel allocation and trip break-even status.
 - Preserve local, readable trip data without a backend or database server.
 - Provide an accessible desktop and mobile experience.
 
@@ -129,10 +129,19 @@ estimatedCost = recommendedFuelLiter * fuelPricePerLiter
 - Status badges explicitly say `Refueled` or `Not refueled` and do not rely only on color.
 - A three-dot menu provides:
   - Open route.
-  - Mark as refueled or not refueled.
   - Delete trip.
 - Deletion requires confirmation through a modal dialog.
-- Outstanding recommended liters and estimated cost include only trips not marked as refueled.
+- Refuel amounts are recorded globally, not edited from individual trips.
+- The global refuel action displays current outstanding fuel, entered refuel amount, projected remaining fuel, and the number of trips that will reach break-even.
+- Global refuel accepts a positive decimal liter amount.
+- Allocation uses FIFO order: the oldest outstanding trip is covered first, followed by the next oldest trip.
+- A trip remains `Not refueled` while its allocated amount is below its recommended fuel requirement.
+- A trip changes to `Refueled` only when its cumulative global allocation reaches or exceeds its recommended fuel requirement.
+- Any entered amount beyond total outstanding fuel is reported as excess and is not allocated.
+- Remaining fuel for each trip is calculated as `max(recommendedFuelLiter - refueledFuelLiter, 0)`.
+- Outstanding liters equal the sum of remaining fuel across all trips.
+- Outstanding cost equals each trip's remaining liters multiplied by that trip's fuel price.
+- Existing records without `refueledFuelLiter` remain compatible: records marked refueled are treated as fully refueled; other records are treated as 0 L refueled.
 
 ## 8. Analytics
 
@@ -195,8 +204,9 @@ Each JSON record contains:
 - Reserve margin percentage.
 - Minimum and recommended fuel liters.
 - Estimated cost.
+- Total fuel refueled so far.
 - Refueled status.
-- Creation and optional refueled timestamps.
+- Creation, refuel update, and optional fully-refueled timestamps.
 
 ### Git Behavior
 
@@ -233,6 +243,22 @@ Each JSON record contains:
 - Guaranteed mobile filesystem writing.
 
 ## 14. Revision History
+
+### Version 2.2 - 2026-06-23
+
+- Replaced per-trip partial refuel input with one global refuel action.
+- Added oldest-first FIFO allocation across outstanding trips.
+- Changed trip status to Refueled only after its allocated amount reaches break-even.
+- Removed the Partially refueled badge and per-trip refuel progress UI.
+- Added global allocation preview with projected break-even trip count and remaining fuel.
+
+### Version 2.1 - 2026-06-23
+
+- Added partial-refuel amount tracking per trip.
+- Added a dialog comparing recommended fuel `x` with total refueled fuel `y`.
+- Added partially-refueled status and liter progress in desktop and mobile history.
+- Changed outstanding fuel and cost to use the actual remaining amount after partial refuels.
+- Preserved backward compatibility with existing `isRefueled` records.
 
 ### Version 2.0 - 2026-06-20
 

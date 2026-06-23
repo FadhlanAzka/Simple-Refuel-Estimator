@@ -54,6 +54,7 @@ const elements = {
   viewAllTrips: document.querySelector("#view-all-trips"),
   outstandingFuel: document.querySelector("#outstanding-fuel"),
   outstandingCost: document.querySelector("#outstanding-cost"),
+  recordGlobalRefuel: document.querySelector("#record-global-refuel"),
   summaryFuel: document.querySelector("#summary-fuel"),
   summarySpending: document.querySelector("#summary-spending"),
   summaryAverage: document.querySelector("#summary-average"),
@@ -65,6 +66,14 @@ const elements = {
   chartSvg: document.querySelector("#analytics-chart-svg"),
   chartTooltip: document.querySelector("#chart-tooltip"),
   chartEmpty: document.querySelector("#chart-empty"),
+  globalRefuelDialog: document.querySelector("#global-refuel-dialog"),
+  globalOutstanding: document.querySelector("#global-outstanding"),
+  globalCoveredTrips: document.querySelector("#global-covered-trips"),
+  globalRefuelAmount: document.querySelector("#global-refuel-amount"),
+  globalRefuelError: document.querySelector("#global-refuel-error"),
+  globalRefuelPreview: document.querySelector("#global-refuel-preview"),
+  cancelGlobalRefuel: document.querySelector("#cancel-global-refuel"),
+  applyGlobalRefuel: document.querySelector("#apply-global-refuel"),
   deleteDialog: document.querySelector("#delete-dialog"),
   cancelDelete: document.querySelector("#cancel-delete"),
   confirmDelete: document.querySelector("#confirm-delete")
@@ -417,8 +426,9 @@ async function saveCurrentTrip() {
     marginPercent: values.margin,
     minimumFuelLiter: estimate.minimumFuelLiter,
     recommendedFuelLiter: estimate.recommendedFuelLiter,
-    estimatedCost: estimate.estimatedCost,
-    isRefueled: false,
+      estimatedCost: estimate.estimatedCost,
+      refueledFuelLiter: 0,
+      isRefueled: false,
     createdAt: new Date().toISOString(),
     refueledAt: null
   };
@@ -448,10 +458,30 @@ function sortTripsNewest(trips) {
   return [...trips].sort((a, b) => getTripTimestamp(b) - getTripTimestamp(a));
 }
 
+function getRecommendedFuel(trip) {
+  return Math.max(Number(trip.recommendedFuelLiter) || 0, 0);
+}
+
+function getRefueledFuel(trip) {
+  const storedAmount = Number(trip.refueledFuelLiter);
+  if (Number.isFinite(storedAmount) && storedAmount >= 0) return storedAmount;
+  return trip.isRefueled ? getRecommendedFuel(trip) : 0;
+}
+
+function getRemainingFuel(trip) {
+  return Math.max(getRecommendedFuel(trip) - getRefueledFuel(trip), 0);
+}
+
+function getRefuelStatus(trip) {
+  return getRemainingFuel(trip) <= 0.000001 ? "refueled" : "pending";
+}
+
 function createStatusBadge(trip) {
+  const status = getRefuelStatus(trip);
+  const labels = { pending: "Not refueled", refueled: "Refueled" };
   const badge = document.createElement("span");
-  badge.className = `status-badge ${trip.isRefueled ? "status-refueled" : "status-pending"}`;
-  badge.textContent = trip.isRefueled ? "Refueled" : "Not refueled";
+  badge.className = `status-badge status-${status}`;
+  badge.textContent = labels[status];
   return badge;
 }
 
@@ -480,14 +510,6 @@ function createActionMenu(trip) {
     routeLink.setAttribute("role", "menuitem");
     menu.append(routeLink);
   }
-  const statusButton = document.createElement("button");
-  statusButton.type = "button";
-  statusButton.className = "menu-item";
-  statusButton.dataset.action = "toggle-refuel";
-  statusButton.dataset.id = trip.id;
-  statusButton.setAttribute("role", "menuitem");
-  statusButton.disabled = !state.hasWriteAccess;
-  statusButton.textContent = trip.isRefueled ? "Mark as not refueled" : "Mark as refueled";
   const deleteButton = document.createElement("button");
   deleteButton.type = "button";
   deleteButton.className = "menu-item menu-item-danger";
@@ -496,7 +518,7 @@ function createActionMenu(trip) {
   deleteButton.setAttribute("role", "menuitem");
   deleteButton.disabled = !state.hasWriteAccess;
   deleteButton.textContent = "Delete trip";
-  menu.append(statusButton, deleteButton);
+  menu.append(deleteButton);
 
   trigger.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -574,11 +596,18 @@ function renderHistory() {
 }
 
 function renderOutstandingTotals() {
-  const pending = state.trips.filter((trip) => !trip.isRefueled);
-  const fuel = pending.reduce((sum, trip) => sum + (Number(trip.recommendedFuelLiter) || 0), 0);
-  const cost = pending.reduce((sum, trip) => sum + (Number(trip.estimatedCost) || 0), 0);
+  const fuel = state.trips.reduce((sum, trip) => sum + getRemainingFuel(trip), 0);
+  const cost = state.trips.reduce((sum, trip) => {
+    return sum + getRemainingFuel(trip) * (Number(trip.fuelPricePerLiter) || 0);
+  }, 0);
   elements.outstandingFuel.textContent = `${formatFuel(fuel)} L`;
   elements.outstandingCost.textContent = formatCurrency(cost);
+  elements.recordGlobalRefuel.disabled = !state.hasWriteAccess || fuel <= 0.000001;
+  elements.recordGlobalRefuel.title = !state.hasWriteAccess
+    ? "Connect the project folder to record a global refuel."
+    : fuel <= 0.000001
+      ? "All saved trips have reached break-even."
+      : "Allocate a refuel amount to the oldest outstanding trips.";
 }
 
 function closeActionMenus() {
@@ -586,21 +615,95 @@ function closeActionMenus() {
   document.querySelectorAll(".menu-trigger[aria-expanded='true']").forEach((button) => button.setAttribute("aria-expanded", "false"));
 }
 
-async function updateRefuelStatus(id) {
-  if (!state.hasWriteAccess) return;
-  const trip = state.trips.find((item) => item.id === id);
-  if (!trip) return;
-  const previous = trip.isRefueled;
-  trip.isRefueled = !trip.isRefueled;
-  trip.refueledAt = trip.isRefueled ? new Date().toISOString() : null;
+function calculateGlobalAllocation(amount) {
+  let available = Math.max(Number(amount) || 0, 0);
+  let coveredTrips = 0;
+  const allocations = [];
+  const outstandingTrips = [...state.trips]
+    .filter((trip) => getRemainingFuel(trip) > 0.000001)
+    .sort((a, b) => getTripTimestamp(a) - getTripTimestamp(b));
+
+  outstandingTrips.forEach((trip) => {
+    if (available <= 0.000001) return;
+    const remaining = getRemainingFuel(trip);
+    const allocated = Math.min(remaining, available);
+    if (allocated <= 0) return;
+    const reachesBreakEven = allocated + 0.000001 >= remaining;
+    allocations.push({ trip, allocated, reachesBreakEven });
+    if (reachesBreakEven) coveredTrips += 1;
+    available -= allocated;
+  });
+
+  const totalOutstanding = state.trips.reduce((sum, trip) => sum + getRemainingFuel(trip), 0);
+  const allocatedTotal = allocations.reduce((sum, item) => sum + item.allocated, 0);
+  return {
+    allocations,
+    coveredTrips,
+    allocatedTotal,
+    remainingAfter: Math.max(totalOutstanding - allocatedTotal, 0),
+    excess: Math.max(amount - allocatedTotal, 0)
+  };
+}
+
+function openGlobalRefuelDialog() {
+  const outstanding = state.trips.reduce((sum, trip) => sum + getRemainingFuel(trip), 0);
+  if (!state.hasWriteAccess || outstanding <= 0.000001) return;
+  elements.globalOutstanding.textContent = `${formatFuel(outstanding)} L`;
+  elements.globalRefuelAmount.value = "";
+  elements.globalRefuelError.textContent = "";
+  updateGlobalRefuelPreview();
+  elements.globalRefuelDialog.showModal();
+  elements.globalRefuelAmount.focus();
+}
+
+function updateGlobalRefuelPreview() {
+  const amount = parseDecimal(elements.globalRefuelAmount.value);
+  const valid = Number.isFinite(amount) && amount > 0;
+  elements.globalRefuelError.textContent = valid ? "" : "Enter a refuel amount greater than 0 liters.";
+  elements.globalRefuelAmount.setAttribute("aria-invalid", valid ? "false" : "true");
+  elements.applyGlobalRefuel.disabled = !valid;
+  const allocation = calculateGlobalAllocation(valid ? amount : 0);
+  elements.globalCoveredTrips.textContent = `${allocation.coveredTrips} ${allocation.coveredTrips === 1 ? "trip" : "trips"}`;
+  const excessText = allocation.excess > 0.000001 ? ` Excess ${formatFuel(allocation.excess)} L is not allocated.` : "";
+  elements.globalRefuelPreview.textContent = `Remaining after allocation: ${formatFuel(allocation.remainingAfter)} L.${excessText}`;
+}
+
+async function applyGlobalRefuel() {
+  const amount = parseDecimal(elements.globalRefuelAmount.value);
+  if (!state.hasWriteAccess || !Number.isFinite(amount) || amount <= 0) return;
+  const allocation = calculateGlobalAllocation(amount);
+  if (!allocation.allocations.length) return;
+  const previous = allocation.allocations.map(({ trip }) => ({
+    trip,
+    refueledFuelLiter: trip.refueledFuelLiter,
+    isRefueled: trip.isRefueled,
+    refueledAt: trip.refueledAt,
+    refuelUpdatedAt: trip.refuelUpdatedAt
+  }));
+  const now = new Date().toISOString();
+  allocation.allocations.forEach(({ trip, allocated }) => {
+    trip.refueledFuelLiter = getRefueledFuel(trip) + allocated;
+    trip.isRefueled = getRemainingFuel(trip) <= 0.000001;
+    trip.refueledAt = trip.isRefueled ? now : null;
+    trip.refuelUpdatedAt = now;
+  });
+  elements.applyGlobalRefuel.disabled = true;
   try {
     await writeTripsFile();
+    elements.globalRefuelDialog.close();
     renderHistory();
     renderAnalytics();
-    showToast(trip.isRefueled ? "Trip marked as refueled." : "Trip marked as not refueled.");
+    const excessText = allocation.excess > 0.000001 ? ` ${formatFuel(allocation.excess)} L excess was not allocated.` : "";
+    showToast(`${formatFuel(allocation.allocatedTotal)} L allocated; ${allocation.coveredTrips} trips reached break-even.${excessText}`);
   } catch (error) {
-    trip.isRefueled = previous;
-    showToast(`Could not update trip: ${error.message}`, true);
+    previous.forEach((item) => {
+      item.trip.refueledFuelLiter = item.refueledFuelLiter;
+      item.trip.isRefueled = item.isRefueled;
+      item.trip.refueledAt = item.refueledAt;
+      item.trip.refuelUpdatedAt = item.refuelUpdatedAt;
+    });
+    elements.applyGlobalRefuel.disabled = false;
+    showToast(`Could not apply global refuel: ${error.message}`, true);
   }
 }
 
@@ -884,6 +987,7 @@ elements.quickOptions.forEach((button) => {
 });
 
 elements.saveTrip.addEventListener("click", saveCurrentTrip);
+elements.recordGlobalRefuel.addEventListener("click", openGlobalRefuelDialog);
 elements.chooseFolder.addEventListener("click", () => {
   if (state.directoryHandle && !state.hasWriteAccess) reconnectRememberedFolder();
   else chooseProjectFolder();
@@ -928,7 +1032,6 @@ document.addEventListener("click", (event) => {
   const action = event.target.closest("[data-action]");
   if (action) {
     const id = action.dataset.id;
-    if (action.dataset.action === "toggle-refuel") updateRefuelStatus(id);
     if (action.dataset.action === "delete") requestTripDeletion(id);
     closeActionMenus();
     return;
@@ -938,6 +1041,23 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeActionMenus();
+});
+
+elements.globalRefuelAmount.addEventListener("input", updateGlobalRefuelPreview);
+elements.globalRefuelAmount.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !elements.applyGlobalRefuel.disabled) {
+    event.preventDefault();
+    applyGlobalRefuel();
+  }
+});
+elements.cancelGlobalRefuel.addEventListener("click", () => {
+  elements.globalRefuelDialog.close();
+});
+elements.applyGlobalRefuel.addEventListener("click", applyGlobalRefuel);
+elements.globalRefuelDialog.addEventListener("click", (event) => {
+  if (event.target === elements.globalRefuelDialog) {
+    elements.globalRefuelDialog.close();
+  }
 });
 
 elements.cancelDelete.addEventListener("click", () => {
